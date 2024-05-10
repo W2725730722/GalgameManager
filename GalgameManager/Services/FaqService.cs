@@ -1,10 +1,11 @@
 ﻿using System.Collections.ObjectModel;
-using System.Text.Json;
 using Windows.Storage;
 using GalgameManager.Contracts.Services;
 using GalgameManager.Enums;
 using GalgameManager.Helpers;
 using GalgameManager.Models;
+using Microsoft.UI.Xaml.Controls;
+using Newtonsoft.Json;
 
 namespace GalgameManager.Services;
 
@@ -15,13 +16,15 @@ public class FaqService : IFaqService
     private readonly TimeSpan _minDateTime = new(1, 0, 0, 0);
     private ObservableCollection<Faq> _faqs = new();
     private readonly ILocalSettingsService _localSettingsService;
+    private readonly IInfoService _infoService;
     private bool _isInitialized;
-    public bool IsUpdating;
-    public event VoidDelegate? UpdateStatusChangeEvent;
+    public bool IsUpdating { get; private set; }
+    public event Action? UpdateStatusChangeEvent;
 
-    public FaqService(ILocalSettingsService localSettingsService)
+    public FaqService(ILocalSettingsService localSettingsService, IInfoService infoService)
     {
         _localSettingsService = localSettingsService;
+        _infoService = infoService;
     }
 
     private async Task Init()
@@ -43,7 +46,7 @@ public class FaqService : IFaqService
         IsUpdating = true;
         UpdateStatusChangeEvent?.Invoke();
         var local = ResourceExtensions.GetLocal();
-        await DownloadAndSaveFaqs($"https://raw.gitmirror.com/GoldenPotato137/GalgameManager/main/FAQ/{local}.json");
+        await DownloadAndSaveFaqs($"https://raw.gitmirror.com/GoldenPotato137/GalgameManager/main/docs/FAQ/{local}.json");
         await LoadFaqs();
         _lastUpdateDateTime = DateTime.Now;
         await _localSettingsService.SaveSettingAsync(KeyValues.FaqLastUpdate, _lastUpdateDateTime);
@@ -53,13 +56,13 @@ public class FaqService : IFaqService
         return _faqs;
     }
 
-    private static async Task DownloadAndSaveFaqs(string? jsonUrl)
+    private async Task DownloadAndSaveFaqs(string? jsonUrl)
     {
         if (jsonUrl == null) return;
-        HttpClient httpClient = new();
-        HttpResponseMessage response = await httpClient.GetAsync(jsonUrl);
+        HttpClient httpClient = Utils.GetDefaultHttpClient();
         try
         {
+            HttpResponseMessage response = await httpClient.GetAsync(jsonUrl);
             response.EnsureSuccessStatusCode();
             var data = await response.Content.ReadAsByteArrayAsync();
             StorageFolder? localFolder = ApplicationData.Current.LocalFolder;
@@ -71,9 +74,9 @@ public class FaqService : IFaqService
             await memoryStream.CopyToAsync(fileStream);
             fileStream.Close();
         }
-        catch (Exception)
+        catch (Exception e)
         {
-            // ignored
+            _infoService.Event(EventType.FaqEvent, InfoBarSeverity.Error, "FaqService_DownloadError".GetLocalized(), e);
         }
     }
 
@@ -89,14 +92,14 @@ public class FaqService : IFaqService
                 if (json != null)
                 {
                     _faqs.Clear();
-                    _faqs = JsonSerializer.Deserialize<ObservableCollection<Faq>>(json) ??
+                    _faqs = JsonConvert.DeserializeObject<ObservableCollection<Faq>>(json) ??
                             new ObservableCollection<Faq>();
                 }
             }
         }
-        catch (Exception)
+        catch (Exception e)
         {
-            // ignored
+            _infoService.Event(EventType.FaqEvent, InfoBarSeverity.Error, "FaqService_LoadError".GetLocalized(), e);
         }
     }
 }

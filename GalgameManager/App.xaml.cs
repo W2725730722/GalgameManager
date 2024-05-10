@@ -1,20 +1,23 @@
-﻿using Windows.ApplicationModel.DataTransfer;
-using GalgameManager.Activation;
+﻿using GalgameManager.Activation;
 using GalgameManager.Contracts.Services;
 using GalgameManager.Core.Contracts.Services;
 using GalgameManager.Core.Services;
+using GalgameManager.Enums;
 using GalgameManager.Helpers;
 using GalgameManager.Models;
 using GalgameManager.Services;
 using GalgameManager.ViewModels;
 using GalgameManager.Views;
+using H.NotifyIcon;
+using LaunchActivatedEventArgs = Microsoft.UI.Xaml.LaunchActivatedEventArgs;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Windows.AppLifecycle;
-using LaunchActivatedEventArgs = Microsoft.UI.Xaml.LaunchActivatedEventArgs;
 using UnhandledExceptionEventArgs = Microsoft.UI.Xaml.UnhandledExceptionEventArgs;
+using WindowExtensions = H.NotifyIcon.WindowExtensions;
 
 namespace GalgameManager;
 
@@ -31,20 +34,28 @@ public partial class App : Application
         get;
     }
 
-    public static T GetService<T>()
-        where T : class
+    public static T GetService<T>() where T : class
     {
         if ((Current as App)!.Host.Services.GetService(typeof(T)) is not T service)
-        {
             throw new ArgumentException($"{typeof(T)} needs to be registered in ConfigureServices within App.xaml.cs.");
-        }
-
         return service;
     }
+    
+    public static T GetResource<T>(string key)
+    {
+        if (Current.Resources[key] is not T resource)
+            throw new ArgumentException($"{key} needs to be registered in Resource.xaml.");
+        return resource;
+    }
 
-    public static WindowEx MainWindow { get; } = new MainWindow();
+    private static Application _instance = null!;
+    public static WindowEx? MainWindow { get; set; }
+    public static TaskbarIcon? SystemTray { get; set; }
     
     public static UIElement? AppTitlebar { get; set; }
+    public static bool Closing;
+    public static event Action? OnAppClosing;
+    public static DispatcherQueue DispatcherQueue { get; } = DispatcherQueue.GetForCurrentThread();
 
     public App()
     {
@@ -82,13 +93,22 @@ public partial class App : Application
             services.AddSingleton<IAppCenterService, AppCenterService>();
             services.AddSingleton<IAuthenticationService, AuthenticationService>();
             services.AddSingleton<IBgmOAuthService, BgmOAuthService>();
+            services.AddSingleton<IInfoService, InfoService>();
+            services.AddSingleton<IBgTaskService, BgTaskService>();
+            services.AddSingleton<IPvnService, PvnService>();
 
             // Core Services
             services.AddSingleton<IFileService, FileService>();
 
             // Views and ViewModels
+            services.AddTransient<InfoViewModel>();
+            services.AddTransient<InfoPage>();
+            services.AddTransient<AccountViewModel>();
+            services.AddTransient<AccountPage>();
             services.AddTransient<CategoryViewModel>();
             services.AddTransient<CategoryPage>();
+            services.AddTransient<CategorySettingViewModel>();
+            services.AddTransient<CategorySettingPage>();
             services.AddTransient<HelpViewModel>();
             services.AddTransient<HelpPage>();
             services.AddTransient<GalgameSettingViewModel>();
@@ -109,6 +129,8 @@ public partial class App : Application
             services.AddTransient<HomePage>();
             services.AddTransient<ShellPage>();
             services.AddTransient<ShellViewModel>();
+            services.AddTransient<GalgameCharacterPage>();
+            services.AddTransient<GalgameCharacterViewModel>();
 
             // Configuration
             services.Configure<LocalSettingsOptions>(context.Configuration.GetSection(nameof(LocalSettingsOptions)));
@@ -119,43 +141,12 @@ public partial class App : Application
         AppInstance.GetCurrent().Activated += OnActivated;
     }
 
-    private async void App_UnhandledException(object sender, UnhandledExceptionEventArgs e)
+    private void App_UnhandledException(object sender, UnhandledExceptionEventArgs e)
     {
         // https://docs.microsoft.com/windows/windows-app-sdk/api/winrt/microsoft.ui.xaml.application.unhandledexception.
-        ContentDialog dialog = new()
-        {
-            XamlRoot = MainWindow.Content.XamlRoot,
-            Title = "App_UnhandledException_Oops".GetLocalized(),
-            PrimaryButtonText = "App_UnhandledException_BackToHome".GetLocalized(),
-            CloseButtonText = "App_UnhandledException_Exit".GetLocalized(),
-            DefaultButton = ContentDialogButton.Primary
-        };
-        StackPanel stackPanel = new();
-        stackPanel.Children.Add(new TextBlock
-        {
-            Text = e.Exception.ToString(),
-            TextWrapping = TextWrapping.WrapWholeWords
-        });
-        HyperlinkButton button = new()
-        {
-            Content = "App_UnhandledException_Hyperlink".GetLocalized(),
-            NavigateUri = new Uri("https://github.com/GoldenPotato137/GalgameManager/issues/new/choose"),
-        };
-        button.Click += (_, _) =>
-        {
-            DataPackage package = new();
-            package.SetText(e.Exception.ToString());
-            Clipboard.SetContent(package);
-        };
-        stackPanel.Children.Add(button);
-        dialog.Content = stackPanel;
-        dialog.PrimaryButtonClick += (_, _) =>
-        {
-            GetService<INavigationService>().NavigateTo(typeof(HomeViewModel).FullName!);
-        };
-        dialog.CloseButtonClick += (_, _) => { Exit();};
-        e.Handled = true;
-        await dialog.ShowAsync();
+        GetService<ILocalSettingsService>().SaveSettingAsync(KeyValues.LastError, e.Message + "\n" + e.Exception);
+        e.Handled = false;
+        SetWindowMode(WindowMode.Close);
     }
     
     /// <summary>
@@ -164,12 +155,60 @@ public partial class App : Application
     protected async override void OnLaunched(LaunchActivatedEventArgs args)
     {
         base.OnLaunched(args);
-
+        _instance = this;
         await GetService<IActivationService>().LaunchedAsync(AppInstance.GetCurrent().GetActivatedEventArgs());
     }
 
     private async void OnActivated(object?_, AppActivationArguments arguments)
     {
         await GetService<IActivationService>().HandleActivationAsync(arguments);
+        await UiThreadInvokeHelper.InvokeAsync(() =>
+        {
+            SetWindowMode(WindowMode.Normal);
+        });
+    }
+    
+    /// <summary>
+    /// 设置窗口模式<br/>
+    /// <para>
+    /// 其中最小化到系统托盘的模式以重启代替关闭主窗口，窗口关闭后内存无法释放<br/>
+    /// 见：https://github.com/microsoft/microsoft-ui-xaml/issues/9063<br/>
+    /// https://github.com/microsoft/microsoft-ui-xaml/issues/7282
+    /// </para>
+    /// </summary>
+    /// <param name="mode"></param>
+    public static void SetWindowMode(WindowMode mode)
+    {
+        switch (mode)
+        {
+            case WindowMode.Normal:
+                GetService<IPageService>().InitAsync();
+                WindowExtensions.Show(MainWindow!);
+                MainWindow!.Restore();
+                MainWindow!.BringToFront();
+                if (GetService<ILocalSettingsService>().ReadSettingAsync<string>(KeyValues.LastError)
+                        .Result is { } error)
+                {
+                    GetService<IInfoService>().Event(EventType.AppError, InfoBarSeverity.Error,
+                        "App_Error".GetLocalized(), msg: error);
+                    GetService<ILocalSettingsService>().RemoveSettingAsync(KeyValues.LastError);
+                }
+                break;
+            case WindowMode.Minimize:
+                MainWindow!.Minimize();
+                break;
+            case WindowMode.SystemTray:
+                OnAppClosing?.Invoke();
+                GetService<IBgTaskService>().SaveBgTasksString();
+                AppInstance.Restart("/r");
+                WindowExtensions.Hide(MainWindow!);
+                break;
+            case WindowMode.Close:
+                OnAppClosing?.Invoke();
+                Closing = true;
+                SystemTray?.Dispose();
+                _instance.Exit();
+                break;
+        }
     }
 }

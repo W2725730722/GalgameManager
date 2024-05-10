@@ -1,4 +1,5 @@
-﻿using GalgameManager.Models;
+﻿using GalgameManager.Helpers;
+using GalgameManager.Models;
 
 namespace GalgameManager.Services;
 
@@ -8,6 +9,7 @@ public partial class GalgameCollectionService
     {
         Add,
         Remove,
+        Update,
         Play,
         ApplyFilter,
         ApplySearch,
@@ -30,6 +32,7 @@ public partial class GalgameCollectionService
             case UpdateType.Remove:
                 TryRemoveFromDisplay(galgame!);
                 break;
+            case UpdateType.Update:
             case UpdateType.Play:
                 TryRemoveFromDisplay(galgame!);
                 TryAddToDisplay(galgame!);
@@ -62,10 +65,8 @@ public partial class GalgameCollectionService
     {
         if (_displayGalgames.Contains(galgame)) return;
         if (CheckDisplay(galgame) == false) return;
-        // 根据当前排序方式插入
-        UpdateSortKeys();
         for(var i = 0;i < _displayGalgames.Count;i++) //这里可以用二分查找优化, 暂时不做
-            if (galgame.CompareTo(_displayGalgames[i]) <= 0)
+            if (galgame.CompareTo(_displayGalgames[i]) >= 0)
             {
                 _displayGalgames.Insert(i, galgame);
                 return;
@@ -101,9 +102,8 @@ public partial class GalgameCollectionService
 
     private bool ApplySearchKey(Galgame galgame)
     {
-        if (galgame.Name.Value!.Contains(_searchKey)) return true;
-        if (galgame.Developer.Value!.Contains(_searchKey)) return true;
-        if (galgame.Tags.Value!.Any(str => str.Contains(_searchKey))) return true;
-        return false;
+        return galgame.Name.Value!.ContainX(_searchKey) || 
+               galgame.Developer.Value!.ContainX(_searchKey) || 
+               galgame.Tags.Value!.Any(str => str.ContainX(_searchKey));
     }
 }

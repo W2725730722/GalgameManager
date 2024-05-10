@@ -24,6 +24,7 @@ public class LocalSettingsService : ILocalSettingsService
     private IDictionary<string, object> _settings;
 
     private bool _isInitialized;
+    private bool _isUpgrade;
     
     public event ILocalSettingsService.Delegate? OnSettingChanged;
 
@@ -37,28 +38,48 @@ public class LocalSettingsService : ILocalSettingsService
         _localsettingsBackupFile = op.BackUpSettingsFile ?? ErrorFileName;
 
         _settings = new Dictionary<string, object>();
-        
-        App.MainWindow.AppWindow.Closing += async (_, _) =>
+
+        async void OnAppClosing()
         {
             await _fileService.WaitForWriteFinishAsync();
-        };
+        }
+
+        App.OnAppClosing += OnAppClosing;
+        Upgrade().Wait();
     }
 
+    /// <summary>
+    /// 仅在读大文件时调用
+    /// </summary>
+    /// <exception cref="ConfigurationErrorsException"></exception>
     private async Task InitializeAsync()
     {
         if (_isInitialized) return;
         var retry = 0;
         while (true)
         {
-            if (retry > 3) throw new ConfigurationErrorsException("配置读取失败");
-            await UpgradeAsync();
+            if (retry > 3) //配置读取失败且无法回复，全新启动
+            {
+                _settings = new Dictionary<string, object>();
+                return;
+            }
 
-            _settings = _fileService.Read<IDictionary<string, object>>(_applicationDataFolder, _localsettingsFile) ?? 
-                        new Dictionary<string, object>();
+            await UpgradeSaveFormat();
 
+            var reset = false;
+            try
+            {
+                _settings = _fileService.Read<IDictionary<string, object>>(_applicationDataFolder, _localsettingsFile) ?? 
+                            new Dictionary<string, object>();
+            }
+            catch
+            {
+                reset = true;
+            }
+            
             var settingFile = Path.Combine(_applicationDataFolder, _localsettingsFile);
             var backupFile = Path.Combine(_applicationDataFolder, _localsettingsBackupFile);
-            if (CheckSettings() == false)
+            if (reset || CheckSettings() == false)
             {
                 // 恢复最后一个正确的配置
                 if (File.Exists(Path.Combine(_applicationDataFolder, _localsettingsBackupFile))) 
@@ -79,19 +100,46 @@ public class LocalSettingsService : ILocalSettingsService
         }
     }
 
-    private async Task UpgradeAsync()
+    /// <summary>
+    /// 更新存储格式, 用于大文件
+    /// </summary>
+    private async Task UpgradeSaveFormat()
     {
         if (await ReadSettingAsync<bool>(KeyValues.SaveFormatUpgraded) == false)
         {
+            IDictionary<string, object> old = _fileService.Read<IDictionary<string, object>>
+                (_applicationDataFolder, _localsettingsFile) ??new Dictionary<string, object>();
             // 原本莫名其妙把数据序列化了两次，弱智了
             // 把被序列化两次的数据恢复过来
             Dictionary<string, object> tmp = new();
-            _settings = _fileService.Read<IDictionary<string, object>>(_applicationDataFolder, _localsettingsFile) ?? new Dictionary<string, object>();
-            foreach (var key in _settings.Keys)
-                tmp[key] = JsonConvert.DeserializeObject(_settings[key].ToString()!)!;
+            foreach (var key in old.Keys)
+                tmp[key] = JsonConvert.DeserializeObject(old[key].ToString()!)!;
             _fileService.SaveNow(_applicationDataFolder, _localsettingsFile, tmp);
             await SaveSettingAsync(KeyValues.SaveFormatUpgraded, true);
         }
+    }
+
+    /// <summary>
+    /// 更新配置
+    /// </summary>
+    private async Task Upgrade()
+    {
+        if (_isUpgrade) return;
+        //public const string SortKey1 = "sortKey1";
+        //public const string SortKey2 = "sortKey2";
+        if (await ReadSettingAsync<bool>(KeyValues.SortKeysUpgraded) == false)
+        {
+            SortKeys? sortKey1 = await ReadSettingAsync<SortKeys?>("sortKey1");
+            SortKeys? sortKey2 = await ReadSettingAsync<SortKeys?>("sortKey2");
+            if (sortKey1 != null && sortKey2 != null)
+            {
+                await SaveSettingAsync(KeyValues.SortKeys, new []{sortKey1.Value, sortKey2.Value});
+                await SaveSettingAsync(KeyValues.SortKeysAscending, new []{false, false});
+            }
+            await SaveSettingAsync(KeyValues.SortKeysUpgraded, true);
+        }
+
+        _isUpgrade = true;
     }
 
     public async Task<T?> ReadSettingAsync<T>(string key, bool isLarge = false)
@@ -131,10 +179,10 @@ public class LocalSettingsService : ILocalSettingsService
                 var result = Environment.GetEnvironmentVariable("OneDrive");
                 result = result==null ? null : result + "\\GameSaves";
                 return (T?)(object?)result;
-            case KeyValues.SortKey1:
-                return (T?)(object?)SortKeys.LastPlay;
-            case KeyValues.SortKey2:
-                return (T?)(object?)SortKeys.Developer;
+            case KeyValues.SortKeys:
+                return (T?)(object?)new [] { SortKeys.LastPlay , SortKeys.Developer};
+            case KeyValues.SortKeysAscending:
+                return (T?)(object?)new [] { false , false};
             case KeyValues.SearchChildFolder:
                 return (T?)(object?)false;
             case KeyValues.SearchChildFolderDepth:
@@ -155,12 +203,20 @@ public class LocalSettingsService : ILocalSettingsService
                 return (T?)(object)true;
             case KeyValues.OverrideLocalNameWithChinese:
                 return (T?)(object)false;
+            case KeyValues.MemoryImprove:
+                return (T?)(object)true;
+            case KeyValues.PlayingWindowMode:
+                return (T?)(object)WindowMode.Minimize;
+            case KeyValues.NotifyWhenGetGalgameInFolder:
+            case KeyValues.NotifyWhenUnpackGame:
+            case KeyValues.EventPvnSyncNotify:
+                return (T?)(object)true;
             default:
                 return default;
         }
     }
 
-    public async Task SaveSettingAsync<T>(string key, T value, bool isLarge = false)
+    public async Task SaveSettingAsync<T>(string key, T value, bool isLarge = false, bool triggerEventWhenNull = false)
     {
         if (RuntimeHelper.IsMSIX && !isLarge)
         {
@@ -172,8 +228,9 @@ public class LocalSettingsService : ILocalSettingsService
             _settings[key] = value;
             _fileService.Save(_applicationDataFolder, _localsettingsFile, _settings);
         }
-        if(value != null)
-            OnSettingChanged?.Invoke(key, value);
+
+        if (value != null || triggerEventWhenNull)
+            await UiThreadInvokeHelper.InvokeAsync(() => OnSettingChanged?.Invoke(key, value));
     }
     
     public async Task RemoveSettingAsync(string key)
@@ -190,6 +247,7 @@ public class LocalSettingsService : ILocalSettingsService
 
             _fileService.Save(_applicationDataFolder, _localsettingsFile, _settings);
         }
+        await UiThreadInvokeHelper.InvokeAsync(() => OnSettingChanged?.Invoke(key, null));
     }
 
     /// <summary>

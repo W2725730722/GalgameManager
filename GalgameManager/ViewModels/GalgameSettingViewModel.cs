@@ -21,16 +21,19 @@ public partial class GalgameSettingViewModel : ObservableRecipient, INavigationA
 
     private readonly GalgameCollectionService _galService;
     private readonly INavigationService _navigationService;
+    private readonly IPvnService _pvnService;
     private readonly string[] _searchUrlList = new string[5];
     [ObservableProperty] private string _searchUri = "";
     [ObservableProperty] private bool _isPhrasing;
     [ObservableProperty] private RssType _selectedRss = RssType.None;
 
-    public GalgameSettingViewModel(IDataCollectionService<Galgame> galCollectionService, INavigationService navigationService)
+    public GalgameSettingViewModel(IDataCollectionService<Galgame> galCollectionService, INavigationService navigationService,
+        IPvnService pvnService)
     {
         Gal = new Galgame();
         _galService = (GalgameCollectionService)galCollectionService;
         _navigationService = navigationService;
+        _pvnService = pvnService;
         RssTypes.Add(RssType.Bangumi);
         RssTypes.Add(RssType.Vndb);
         RssTypes.Add(RssType.Mixed);
@@ -42,7 +45,11 @@ public partial class GalgameSettingViewModel : ObservableRecipient, INavigationA
 
     public async void OnNavigatedFrom()
     {
+        if (Gal.ImagePath.Value != Galgame.DefaultImagePath && File.Exists(Gal.ImagePath.Value) == false)
+            Gal.ImagePath.Value = Galgame.DefaultImagePath;
         await _galService.SaveGalgamesAsync(Gal);
+        _pvnService.Upload(Gal, PvnUploadProperties.Infos | PvnUploadProperties.ImageLoc);
+        _galService.PhrasedEvent -= UpdateIsPhrasing;
     }
 
     public void OnNavigatedTo(object parameter)
@@ -92,7 +99,7 @@ public partial class GalgameSettingViewModel : ObservableRecipient, INavigationA
             ViewMode = PickerViewMode.Thumbnail,
             SuggestedStartLocation = PickerLocationId.PicturesLibrary
         };
-        WinRT.Interop.InitializeWithWindow.Initialize(openPicker, App.MainWindow.GetWindowHandle());
+        WinRT.Interop.InitializeWithWindow.Initialize(openPicker, App.MainWindow!.GetWindowHandle());
         openPicker.FileTypeFilter.Add(".jpg");
         openPicker.FileTypeFilter.Add(".jpeg");
         openPicker.FileTypeFilter.Add(".png");

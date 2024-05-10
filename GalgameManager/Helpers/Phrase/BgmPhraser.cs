@@ -11,7 +11,7 @@ using Newtonsoft.Json.Linq;
 
 namespace GalgameManager.Helpers.Phrase;
 
-public class BgmPhraser : IGalInfoPhraser, IGalStatusSync
+public class BgmPhraser : IGalInfoPhraser, IGalStatusSync, IGalCharacterPhraser
 {
     private HttpClient _httpClient;
     private bool _authed;
@@ -34,10 +34,7 @@ public class BgmPhraser : IGalInfoPhraser, IGalStatusSync
     {
         _authed = false;
         var bgmToken = data.Token;
-        _httpClient = new HttpClient();
-        _httpClient.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "GoldenPotato/GalgameManager/1.0-dev (Windows) (https://github.com/GoldenPotato137/GalgameManager)");
-        _httpClient.DefaultRequestHeaders.Accept.Clear();
-        _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        _httpClient = Utils.GetDefaultHttpClient().WithApplicationJson();
         if (!string.IsNullOrEmpty(bgmToken))
         {
             _httpClient.DefaultRequestHeaders.Add("Authorization", "Bearer " + bgmToken);
@@ -150,8 +147,7 @@ public class BgmPhraser : IGalInfoPhraser, IGalStatusSync
         }
         
         if (id == null) return null;
-        var url = "https://api.bgm.tv/v0/subjects/" + id;
-        HttpResponseMessage response = await _httpClient.GetAsync(url);
+        HttpResponseMessage response = await _httpClient.GetAsync($"https://api.bgm.tv/v0/subjects/{id}");
         if (!response.IsSuccessStatusCode) return null;
         
         JToken jsonToken = JToken.Parse(await response.Content.ReadAsStringAsync());
@@ -161,31 +157,31 @@ public class BgmPhraser : IGalInfoPhraser, IGalStatusSync
             // rssType
             RssType = RssType.Bangumi,
             // id
-            Id = jsonToken["id"]!.ToObject<string>()!,
+            Id = jsonToken["id"]?.ToObject<string>() ?? "",
             // name
-            Name = jsonToken["name"]!.ToObject<string>()!,
+            Name = jsonToken["name"]?.ToObject<string>() ?? "",
             // Chinese name
-            CnName = jsonToken["name_cn"]!.ToObject<string>() ?? "",
+            CnName = jsonToken["name_cn"]?.ToObject<string>() ?? "",
             // description
             Description = jsonToken["summary"]!.ToObject<string>() ?? "",
             // imageUrl
-            ImageUrl = jsonToken["images"]!["large"]!.ToObject<string>()!,
+            ImageUrl = jsonToken["images"]?["large"]?.ToObject<string>() ?? "",
             // rating
-            Rating = jsonToken["rating"]!["score"]!.ToObject<float>(),
+            Rating = jsonToken["rating"]?["score"]?.ToObject<float>() ?? 0,
             ReleaseDate = (jsonToken["date"] != null
-                ? IGalInfoPhraser.GetDateTimeFromString(jsonToken["date"]!.ToObject<string>()!)
+                ? IGalInfoPhraser.GetDateTimeFromString(jsonToken["date"]?.ToObject<string>())
                 : null) ?? DateTime.MinValue
         };
         // tags
-        List<JToken>? tags = jsonToken["tags"]!.ToObject<List<JToken>>()!;
+        List<JToken>? tags = jsonToken["tags"]?.ToObject<List<JToken>>();
         result.Tags.Value = new ObservableCollection<string>();
-        tags.ForEach(tag => result.Tags.Value.Add(tag["name"]!.ToObject<string>()!));
+        tags?.ForEach(tag => result.Tags.Value.Add(tag["name"]!.ToObject<string>()!));
         // developer
-        List<JToken>? infoBox = jsonToken["infobox"]!.ToObject<List<JToken>>()!;
-        JToken? developerInfoBox = infoBox.Find(x => x["key"]!.ToObject<string>()!.Contains("开发"));
+        List<JToken>? infoBox = jsonToken["infobox"]?.ToObject<List<JToken>>();
+        JToken? developerInfoBox = infoBox?.Find(x => x["key"]?.ToObject<string>()?.Contains("开发") ?? false);
         if (developerInfoBox?["value"] != null)
         {
-            switch (developerInfoBox["value"]!.Type)
+            switch (developerInfoBox["value"]?.Type)
             {
                 case JTokenType.Array:
                 {
@@ -201,10 +197,36 @@ public class BgmPhraser : IGalInfoPhraser, IGalStatusSync
                     break;
             }
         }
+        var charactersUrl = $"https://api.bgm.tv/v0/subjects/{id}/characters";
+        HttpResponseMessage charactersResponse = await _httpClient.GetAsync(charactersUrl);
+        if (!charactersResponse.IsSuccessStatusCode) return result;
+        List<JToken>? charactersList = JToken.Parse(await charactersResponse.Content.ReadAsStringAsync())?.ToObject<List<JToken>>();
+        result.Characters = new ObservableCollection<GalgameCharacter>();
+        if (charactersList == null) return result;
+        foreach (JToken character in charactersList)
+        {
+            var cid = character["id"]?.ToObject<string>();
+            if (cid == null) continue;
+            GalgameCharacter c = new GalgameCharacter()
+            {
+                Name = character["name"]?.ToObject<string>() ?? "", 
+                Relation = character["relation"]?.ToObject<string>() ?? ""
+            };
+            c.Ids[(int)GetPhraseType()] = cid;
+            result.Characters.Add(c);
+        }
+
         return result;
     }
 
     public RssType GetPhraseType() => RssType.Bangumi;
+
+    public async Task<GalgameCharacter?> GetGalgameCharacter(GalgameCharacter galgameCharacter)
+    {
+        var id = galgameCharacter.Ids[(int)GetPhraseType()];
+        if (id == null) return null;
+        return await GetCharacterById(id);
+    }
 
     /// <summary>
     /// 获取开发商的图片链接
@@ -287,6 +309,71 @@ public class BgmPhraser : IGalInfoPhraser, IGalStatusSync
             await Task.Delay(500);
             if (retry < 3)
                 return await GetDeveloperImageUrlById(id, retry + 1);
+            return null;
+        }
+    }
+
+    private async Task<GalgameCharacter?> GetCharacterById(string id)
+    {
+        HttpResponseMessage response = await _httpClient.GetAsync($"https://api.bgm.tv/v0/characters/{id}");
+        if (!response.IsSuccessStatusCode) return null;
+        try
+        {
+            JToken jsonToken = JToken.Parse(await response.Content.ReadAsStringAsync());
+            GalgameCharacter character = new()
+            {
+                Name = jsonToken["name"]?.ToObject<string?>() ?? "",
+                BirthDay = jsonToken["birth_day"]?.ToObject<int?>(),
+                BirthMon = jsonToken["birth_mon"]?.ToObject<int?>(),
+                BirthYear = jsonToken["birth_year"]?.ToObject<int?>(),
+                Summary = jsonToken["summary"]?.ToObject<string?>() ?? "-", 
+                BloodType = jsonToken["blood_type"]?.ToObject<string?>(),
+                PreviewImageUrl = jsonToken["images"]?["large"]?.ToObject<string?>()?.Replace("/l/", "/g/"),
+                ImageUrl = jsonToken["images"]?["large"]?.ToObject<string?>(),
+            };
+            // 对血型做特殊处理，blood_type可能为空
+            List<JToken>? infoBox = jsonToken["infobox"]?.ToObject<List<JToken>>();
+            JToken? bloodTypeInfoBox = infoBox?.Find(x => x["key"]?.ToObject<string>()?.Contains("血型") ?? false);
+            if (bloodTypeInfoBox?["value"] != null)
+            {
+                character.BloodType = bloodTypeInfoBox!["value"]!.ToObject<string>();
+            }
+            
+            JToken? heightTypeInfoBox = infoBox?.Find(x => x["key"]?.ToObject<string>()?.Contains("身高") ?? false);
+            if (heightTypeInfoBox?["value"] != null)
+            {
+                character.Height = heightTypeInfoBox!["value"]!.ToObject<string>();
+            }
+            
+            JToken? weightTypeInfoBox = infoBox?.Find(x => x["key"]?.ToObject<string>()?.Contains("体重") ?? false);
+            if (weightTypeInfoBox?["value"] != null)
+            {
+                character.Weight = weightTypeInfoBox!["value"]!.ToObject<string>();
+            }
+            
+            JToken? BWHTypeInfoBox = infoBox?.Find(x => x["key"]?.ToObject<string>()?.Contains("BWH") ?? false);
+            if (BWHTypeInfoBox?["value"] != null)
+            {
+                character.BWH = BWHTypeInfoBox!["value"]!.ToObject<string>();
+            }
+            
+            JToken? birthDateTypeInfoBox = infoBox?.Find(x => x["key"]?.ToObject<string>()?.Contains("生日") ?? false);
+            if (birthDateTypeInfoBox?["value"] != null)
+            {
+                character.BirthDate = birthDateTypeInfoBox!["value"]!.ToObject<string>();
+            }
+
+            character.Gender = jsonToken["gender"]?.ToObject<string?>() switch
+            {
+                "male" => Gender.Male,
+                "female" => Gender.Female,
+                _ => Gender.Unknown
+            };
+
+            return character;
+        }
+        catch
+        {
             return null;
         }
     }

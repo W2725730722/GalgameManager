@@ -1,10 +1,11 @@
-﻿using GalgameManager.Contracts.Phrase;
+﻿using System.Collections.ObjectModel;
+using GalgameManager.Contracts.Phrase;
 using GalgameManager.Enums;
 using GalgameManager.Models;
 
 namespace GalgameManager.Helpers.Phrase;
 
-public class MixedPhraser : IGalInfoPhraser
+public class MixedPhraser : IGalInfoPhraser, IGalCharacterPhraser
 {
     private readonly BgmPhraser _bgmPhraser;
     private readonly VndbPhraser _vndbPhraser;
@@ -58,13 +59,13 @@ public class MixedPhraser : IGalInfoPhraser
         // 试图从Id中获取bgmId和vndbId
         try
         {
-            (string? bgmId, string ? vndbId) tmp = TryGetId(galgame.Id);
-            if (tmp.bgmId != null)
+            (string? bgmId, string ? vndbId) tmp = TryGetId(galgame.Ids[(int)RssType.Mixed]);
+            if (string.IsNullOrEmpty(tmp.bgmId) == false)
             {
                 bgm.RssType = RssType.Bangumi;
                 bgm.Id = tmp.bgmId;
             }
-            if (tmp.vndbId != null)
+            if (string.IsNullOrEmpty(tmp.vndbId) == false)
             {
                 vndb.RssType = RssType.Vndb;
                 vndb.Id = tmp.vndbId;
@@ -86,7 +87,7 @@ public class MixedPhraser : IGalInfoPhraser
             RssType = RssType.Mixed,
             Id = $"bgm:{(bgm == null ? "null" : bgm.Id)},vndb:{(vndb == null ? "null" : vndb.Id)}",
             // name
-            Name = vndb != null ? vndb.Name : bgm!.Name,
+            Name = bgm != null ? bgm.Name : vndb!.Name,
             // description
             Description = bgm != null ? bgm.Description : vndb!.Description,
             // expectedPlayTime
@@ -96,7 +97,8 @@ public class MixedPhraser : IGalInfoPhraser
             // imageUrl
             ImageUrl = vndb != null ? vndb.ImageUrl : bgm!.ImageUrl,
             // release date
-            ReleaseDate = bgm?.ReleaseDate ?? vndb!.ReleaseDate
+            ReleaseDate = bgm?.ReleaseDate ?? vndb!.ReleaseDate,
+            Characters =  (bgm?.Characters.Count > 0 ? bgm?.Characters : vndb?.Characters) ?? new ObservableCollection<GalgameCharacter>()
         };
 
         // Chinese name
@@ -133,7 +135,20 @@ public class MixedPhraser : IGalInfoPhraser
         return (bgmId, vndbId);
     }
 
+    public static string TrySetId(string str, string? bgmId, string? vndbId)
+    {
+        (string? bgmId, string? vndbId) lastId = TryGetId(str);
+        bgmId = bgmId ?? lastId.bgmId;
+        vndbId = vndbId ?? lastId.vndbId;
+        return $"bgm:{bgmId},vndb:{vndbId}";
+    }
+
     public RssType GetPhraseType() => RssType.Mixed;
+
+    public async Task<GalgameCharacter?> GetGalgameCharacter(GalgameCharacter galgameCharacter)
+    {
+        return await _bgmPhraser.GetGalgameCharacter(galgameCharacter);
+    }
 }
 
 public class MixedPhraserData : IGalInfoPhraserData

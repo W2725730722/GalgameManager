@@ -1,6 +1,5 @@
 ﻿using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
-using System.Reflection;
 using CommunityToolkit.WinUI;
 using GalgameManager.Contracts.Services;
 using GalgameManager.Core.Contracts.Services;
@@ -9,7 +8,6 @@ using GalgameManager.Helpers;
 using GalgameManager.Helpers.Phrase;
 using GalgameManager.Models;
 using Microsoft.UI.Dispatching;
-using Newtonsoft.Json.Linq;
 
 namespace GalgameManager.Services;
 
@@ -38,7 +36,10 @@ public class CategoryService : ICategoryService
             toRemove.ForEach(c => c.Remove(galgame));
         };
         _bgmPhraser = (BgmPhraser)_galgameService.PhraserList[(int)RssType.Bangumi];
-        App.MainWindow.AppWindow.Closing += async (_, _) => await SaveAsync();
+
+        async void OnAppClosing() => await SaveAsync();
+
+        App.OnAppClosing += OnAppClosing;
         _dispatcher = DispatcherQueue.GetForCurrentThread();
         Thread worker = new(Worker)
         {
@@ -80,6 +81,8 @@ public class CategoryService : ICategoryService
                     {
                         if (_galgameService.GetGalgameFromPath(str) is { } tmp)
                             c.Add(tmp);
+                        else if(_galgameService.GetGalgameFromName(str) is { } tmp2)
+                            c.Add(tmp2);
                     });
             }
         });
@@ -112,6 +115,32 @@ public class CategoryService : ICategoryService
         if (_isInit == false)
             await Init();
         return _categoryGroups;
+    }
+
+    /// <summary>
+    /// 新增分类组
+    /// </summary>
+    /// <param name="name">分类组名</param>
+    /// <returns>创建的分类组</returns>
+    public CategoryGroup AddCategoryGroup(string name)
+    {
+        CategoryGroup newGroup = new(name, CategoryGroupType.Custom);
+        _categoryGroups.Add(newGroup);
+        return newGroup;
+    }
+    
+    /// <summary>
+    /// 删除分类组
+    /// </summary>
+    /// <param name="categoryGroup">分类组</param>
+    public void DeleteCategoryGroup(CategoryGroup categoryGroup)
+    {
+        foreach (Category category in categoryGroup.Categories) // 删除分类组里的分类（如果没有其他分类组在用的话）
+        {
+            if (_categoryGroups.Count(group => group.Categories.Contains(category)) == 1)
+                category.Delete();
+        }
+        _categoryGroups.Remove(categoryGroup);
     }
     
     /// <summary>
@@ -152,9 +181,10 @@ public class CategoryService : ICategoryService
     /// </summary>
     public async Task UpdateAllGames()
     {
-        ObservableCollection<Galgame> games = await _galgameService.GetContentGridDataAsync();
+        List<Galgame> games = _galgameService.Galgames;
         foreach (Galgame game in games)
             UpdateCategory(game);
+        await Task.CompletedTask;
         //todo:空Category删除
     }
 
@@ -169,32 +199,21 @@ public class CategoryService : ICategoryService
             Category? old = GetDeveloperCategory(galgame);
             old?.Remove(galgame);
             
-            Category developer;
-            try
+            var developerStrings = galgame.Developer.Value!.Split(',');
+            foreach (var developerStr in developerStrings)
             {
-                Producer producer = ProducerDataHelper.Producers.First(
-                    p => p.Name == galgame.Developer.Value! || 
-                         p.Latin == galgame.Developer.Value! || 
-                         p.Alias.Contains(galgame.Developer.Value!)
-                         );
-                try
+                Producer producer = ProducerDataHelper.Producers.FirstOrDefault(p =>
+                    p.Names.Any(name => string.Equals(name, developerStr, StringComparison.CurrentCultureIgnoreCase))) ?? new Producer(developerStr);
+                Category? developer = _developerGroup!.Categories.FirstOrDefault(c => 
+                        producer.Names.Any(name => string.Equals(name, c.Name, StringComparison.CurrentCultureIgnoreCase)));
+                if (developer is null)
                 {
-                    developer = _developerGroup!.Categories.First(c => c.Name.Equals(producer.Name));
-                }
-                catch (InvalidOperationException)
-                {
-                    developer = new Category(producer.Name!);
+                    developer = new Category(producer.Name);
                     _queue.Add(developer);
                     _developerGroup!.Categories.Add(developer);
                 }
+                developer.Add(galgame);
             }
-            catch (InvalidOperationException)
-            {
-                developer = new Category(galgame.Developer.Value!);
-                _queue.Add(developer);
-                _developerGroup!.Categories.Add(developer);
-            }
-            developer.Add(galgame);
         }
         
     }
@@ -266,5 +285,15 @@ public class CategoryService : ICategoryService
         _statusCategory[(int)PlayType.Playing] = _statusGroup.Categories[2];
         _statusCategory[(int)PlayType.Shelved] = _statusGroup.Categories[3];
         _statusCategory[(int)PlayType.Abandoned] = _statusGroup.Categories[4];
+    }
+
+    /// <summary>
+    /// 是否在某个type的分类组中
+    /// </summary>
+    /// <param name="category">分类</param>
+    /// <param name="type">type</param>
+    public bool IsInCategoryGroup(Category category, CategoryGroupType type)
+    {
+        return _categoryGroups.Any(g => g.Type == type && g.Categories.Contains(category));
     }
 }
